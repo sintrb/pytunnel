@@ -1,7 +1,7 @@
 from setuptools import setup
 import os, io
+from pytunnel import __version__
 
-__version__ = '1.0.0'
 
 here = os.path.abspath(os.path.dirname(__file__))
 README = io.open(os.path.join(here, 'README.md'), encoding='UTF-8').read()
