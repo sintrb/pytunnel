@@ -2,8 +2,13 @@ CHANGES
 ===============
 1.0.0
 
-- first version
+- First version
 
 2.0.0
 
-- optimize data package
+- Optimize data package
+
+2.1.0
+
+- Fix bugs
+- Use multiprocessing to improve throughput capacity

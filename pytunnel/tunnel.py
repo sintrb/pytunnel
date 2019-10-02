@@ -1,13 +1,18 @@
 from __future__ import print_function
 
-import sys, time
+import sys, time, json
+import socket
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
-READ_BUF_LEN = 1024
+READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
 TIME_FOR_PING_S = 30
 IS_PY3 = sys.version_info >= (3, 0)
+
+
+def print_it(*args):
+    print(time.time(), *args)
 
 
 def send_str(sock, msg, code=0):
@@ -20,10 +25,12 @@ def start_thread(target=None, args=[]):
     th = threading.Thread(target=target, args=args)
     th.setDaemon(True)
     th.start()
-    return th
+    return True
 
 
 def make_package(target, data):
+    if isinstance(data, str) and IS_PY3:
+        data = data.encode()
     package = str(target).encode() + 'L'.encode() + str(len(data)).encode() + 'D'.encode() + data
     return package
 
@@ -38,16 +45,13 @@ def parse_package(package=''):
 
 
 def sock_read(sock, buflen=READ_BUF_LEN):
+    recv = b''
     if sock:
         try:
             recv = sock.recv(buflen)
         except:
             import traceback
             traceback.print_exc()
-            recv = b''
-    else:
-        pass
-        # print('sock_read none')
     return recv
 
 
@@ -62,9 +66,6 @@ def sock_send(sock, data):
         except:
             import traceback
             traceback.print_exc()
-    else:
-        pass
-        # print('sock_send none')
     return False
 
 
@@ -78,8 +79,18 @@ _sock_recv = {}
 _sock_io_map = {}
 
 
+def sock_str(sock):
+    import re
+    s = str(sock)
+    rs = re.findall("laddr=\('(\S+)', (\d+)\), raddr=\('(\S+)', (\d+)\)", s)
+    return '%s<->%s' % (rs[0][1], rs[0][3]) if rs else s
+
+
 def read_package(sock):
     if not sock:
+        print_it("read_package with none")
+        import traceback
+        traceback.print_stack()
         return
     sockid = int(id(sock))
     if sockid not in _sock_io_map:
@@ -90,12 +101,16 @@ def read_package(sock):
         if data:
             return data[0], data[2]
     except:
-        pass
+        import traceback
+        traceback.print_exc()
     return None
 
 
 def send_package(sock, ix, data):
     if not sock:
+        print_it("send_package with none")
+        import traceback
+        traceback.print_stack()
         return
     sockid = int(id(sock))
     if sockid not in _sock_io_map:
@@ -112,13 +127,16 @@ def sock_close(sock, shut=False):
             sock.shutdown(2)
         except:
             import traceback
-            traceback.print_exc()
+            # traceback.print_exc()
     # sock.send(b'')
     sock.close()
     sockid = int(id(sock))
     if sockid in _sock_io_map:
         del _sock_io_map[sockid]
-    print('sock_close', sock, shut)
+        # print_it('-----sock_close-----', sock, shut)
+        # import traceback
+        # traceback.print_stack()
+        # print_it('---end sock_close---')
 
 
 class Lock(object):
@@ -128,22 +146,48 @@ class Lock(object):
         self.lock = Lock()
 
     def __enter__(self):
-        # print('locking', self.name)
+        # print_it('locking', self.name)
         self.lock.acquire()
-        # print('locked', self.name)
+        # print_it('locked', self.name)
 
     def __exit__(self, *unused):
         self.lock.release()
-        # print('released', self.name)
+        # print_it('released', self.name)
+
+
+class PackageIt(object):
+    head = b'DH'
+    leng = b':'
+    buffer = b''
+
+    def feed(self, data):
+        if isinstance(data, str) and IS_PY3:
+            data = data.encode()
+        self.buffer += data
+
+    def recv(self):
+        hix = self.buffer.find(self.head)
+        if hix >= 0:
+            lix = self.buffer.find(self.leng, hix + len(self.head))
+            if lix > 0:
+                lns = self.buffer[hix + len(self.head): lix]
+                pend = lix + len(self.leng) + int(lns)
+                if len(self.buffer) >= pend:
+                    data = self.buffer[lix + len(self.leng):pend]
+                    self.buffer = self.buffer[pend:]
+                    return data
+        return None
+
+    def make(self, data):
+        if isinstance(data, str) and IS_PY3:
+            data = data.encode()
+        pack = self.head + str(len(data)).encode() + self.leng + data
+        return pack
 
 
 class SockIO(object):
     BUF_LEN = 1024
-    HEAD = b'H'
-    LENG = b':'
-
-    timeout = 30
-    buffer = b''
+    _pi = PackageIt()
     _recv_lock = Lock()
     _send_lock = Lock()
 
@@ -153,62 +197,31 @@ class SockIO(object):
 
     def recv(self):
         with self._recv_lock:
-            WAIT_HEAD = 0
-            WAIT_LEN = 1
-            WAIT_DATA = 2
-            RECV_OK = 3
-            HEAD = self.HEAD
-            LENG = self.LENG
-            status = WAIT_HEAD
-            data = b''
-            lens = b''
-            leni = 0
-            buffer = self.buffer
             while True:
-                r = self.sock.recv(self.BUF_LEN)
-                if not r:
-                    raise Exception(u'Socket Error:%s' % str(self.sock))
-                buffer += r
-                if buffer and status == WAIT_HEAD:
-                    if HEAD not in buffer:
-                        continue
-                    status = WAIT_LEN
-                    buffer = buffer[buffer.index(HEAD) + 1:]
-                if buffer and status == WAIT_LEN:
-                    if LENG in buffer:
-                        lens += buffer[0:buffer.index(LENG)]
-                        buffer = buffer[buffer.index(LENG) + 1:]
-                        try:
-                            leni = int(lens)
-                        except:
-                            # frame error
-                            status == WAIT_HEAD
-                        status = WAIT_DATA
-                    else:
-                        # ERROR
-                        lens += buffer
-                        buffer = b''
-                if buffer and status == WAIT_DATA:
-                    toix = min(leni - len(data), len(buffer))
-                    data += buffer[0:toix]
-                    buffer = buffer[toix + 1:]
-                    if len(data) >= leni:
-                        status = RECV_OK
-                if status == RECV_OK:
-                    if buffer:
-                        self.buffer = buffer
+                data = self._pi.recv()
+                if data == None:
+                    r = self.sock.recv(self.BUF_LEN)
+                    if not r:
+                        raise Exception(u'Socket Error:%s' % str(self.sock))
+                    # print(sock_str(self.sock), 'recv', r)
+                    self._pi.feed(r)
+                else:
                     break
             return data
 
     def send(self, data):
-        pack = self.HEAD + str(len(data)).encode() + self.LENG + data
+        if isinstance(data, str) and IS_PY3:
+            data = data.encode()
+        pack = self._pi.make(data)
+        ret = False
         with self._send_lock:
             try:
                 self.sock.sendall(pack)
-                return True
+                ret = True
             except:
                 import traceback
                 traceback.print_exc()
+        return ret
 
     def close(self):
         self.sock.close()
@@ -227,7 +240,7 @@ class Runable(Base):
         return '%s' % (self.__class__.__name__)
 
     def _log(self, msg, *args):
-        print(self, msg, *args)
+        print_it(self, msg, *args)
 
     def _run(self):
         pass
@@ -258,7 +271,6 @@ class SockRunable(Runable):
 
     def stop(self):
         if self._sock:
-            import socket
             self._log('close _sock', self._sock)
             sock_close(self._sock, True)
             self._sock = None
@@ -289,7 +301,8 @@ class Tunnel(SockRunable):
                     self.stop()
                     break
             else:
-                send_package(self.sock, -1 * ix, b'')
+                self._log('a con dis, close', ix)
+                send_package(self.sock, -1 * ix, b'close')
                 sock_close(sock)
                 self._del_con(ix)
                 break
@@ -339,7 +352,6 @@ class Tunnel(SockRunable):
             time.sleep(TIME_FOR_PING_S)
 
     def _run(self):
-        import socket
         try:
             self._sock_th = start_thread(self._run_sock)
             self._ping_th = start_thread(self._run_ping)
@@ -376,7 +388,7 @@ class Tunnel(SockRunable):
                 sock_close(self.sock)
                 self.sock = None
             for d in self._client_map.values():
-                sock_close(d['sock'])
+                sock_close(d['sock'], True)
             self._client_map.clear()
             if self._sock:
                 sock_close(self._sock)
@@ -384,14 +396,13 @@ class Tunnel(SockRunable):
 
                 self._running = False
                 # In Python2, connect to listen port to raise close and release.
-                try:
-                    import socket
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.connect(('127.0.0.1', self.port), )
-                except:
-                    import traceback
-                    traceback.print_exc()
+                # try:
+                #     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                #     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                #     s.connect(('127.0.0.1', self.port), )
+                # except:
+                #     import traceback
+                #     traceback.print_exc()
             super(Tunnel, self).stop()
             self._log('stop')
 
@@ -402,34 +413,46 @@ class Server(SockRunable):
     passwd = '123'
 
     def _ready(self, sock, addr):
-        import json
         _, auth = read_package(sock)
         # self._log('auth', auth)
-        data = json.loads(auth, encoding='utf-8')
+        data = json.loads(auth)
         # self._log('tun req data', data)
         if self.passwd and self.passwd != data.get('passwd'):
             # send_str(sock, 'password error!')
             self._log('Password Error!!!')
-            msg_to_sock(sock, "Password Error!!!")
+            send_package(sock, 0, json.dumps({'status': 'error', 'message': "Password Error!!!"}))
             return
+        send_package(sock, 0, json.dumps({'status': 'ok', 'version': __version__}))
         kwargs = {'sock': sock}
         for k in ['bind', 'port']:
             if data.get(k):
                 kwargs[k] = data[k]
         self._log('new client version: %s' % data['version'])
-        tun = Tunnel(**kwargs)
+        from multiprocessing import Process
+
+        def tunrun():
+            t = Tunnel(**kwargs)
+            t.start()
+            while t._running and self._running:
+                time.sleep(3)
+
+        tun = Process(target=tunrun)
         tun.start()
         return tun
 
     def _run(self):
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._log('binding %s:%s' % (self.bind, self.port))
-        sock.bind((self.bind, self.port), )
-        sock.listen(1000)
-        self._sock = sock
-        self._log('running server %s:%s' % (self.bind, self.port))
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._log('binding %s:%s' % (self.bind, self.port))
+            sock.bind((self.bind, self.port), )
+            sock.listen(1000)
+            self._sock = sock
+            self._log('running server %s:%s' % (self.bind, self.port))
+        except:
+            import traceback
+            traceback.print_exc()
+            self.stop()
         while self._running:
             try:
                 clt_con, clt_add = self._sock.accept()
@@ -462,18 +485,16 @@ class Client(SockRunable):
     def _run_con(self, ix, sock):
         while self._running:
             recv = sock_read(sock)
-            # self._log('conn read', ix, len(recv), recv[0:20])
             if len(recv):
                 send_package(self._sock, ix, recv)
             else:
                 send_package(self._sock, -1 * ix, b'close')
-                self._log('do discon', ix)
+                self._log('a do discon', ix)
                 time.sleep(TIME_WAIT_SEND_S)
                 sock_close(sock)
                 break
 
     def _add_con(self, ix):
-        import socket
         try:
             self._log('add conn', ix)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -496,19 +517,27 @@ class Client(SockRunable):
             time.sleep(TIME_FOR_PING_S)
 
     def _run(self):
-        import socket, json
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._sock = sock
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._log('connecting server %s:%s' % (self.server, self.port))
             sock.connect((self.server, self.port), )
+            self._log('connected server %s:%s' % (self.server, self.port))
+            self._log('verifying...')
             send_package(sock, 0, json.dumps({'version': __version__, 'passwd': self.passwd, 'port': self.proxy_port}))
+            _, data = read_package(sock)
+            ret = json.loads(data)
+            if ret['status'] == 'ok':
+                self._log('server version V%s, verified!' % ret['version'])
+            else:
+                self._log('\033[31m%s: %s\033[0m' % (ret['status'], ret['message']))
+                raise Exception(ret['message'])
         except:
             import traceback
             traceback.print_exc()
+            self.stop()
             return
-        self._log('connected server %s:%s' % (self.server, self.port))
 
         self._ping_th = start_thread(target=self._run_ping)
         self._log('tunnel', '%s:%s' % (self.target_host, self.target_port), '<->', '%s:%s' % (self.server, self.proxy_port))
@@ -603,11 +632,11 @@ def main():
         exit(-1)
 
     def stop(a, b):
-        print('stop')
+        print_it('stop')
         run.stop()
 
     signal.signal(signal.SIGINT, stop)
-    print('---pytunnel V%s---' % __version__)
+    print_it('---pytunnel V%s---' % __version__)
     run.start()
     while run._running:
         time.sleep(1)
