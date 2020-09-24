@@ -3,7 +3,7 @@ from __future__ import print_function
 import sys, time, json
 import socket
 
-__version__ = '2.1.0'
+__version__ = '2.2.0'
 
 READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
@@ -411,6 +411,8 @@ class Server(SockRunable):
     bind = '0.0.0.0'
     port = 1990
     passwd = '123'
+    _tunprocs_map = {}
+    _tunprocs_lock = Lock()
 
     def _ready(self, sock, addr):
         _, auth = read_package(sock)
@@ -423,22 +425,75 @@ class Server(SockRunable):
             send_package(sock, 0, json.dumps({'status': 'error', 'message': "Password Error!!!"}))
             return
         send_package(sock, 0, json.dumps({'status': 'ok', 'version': __version__}))
-        kwargs = {'sock': sock}
+        if data.get('command'):
+            cmds = data['command'].split(' ')
+            cmd = cmds[0]
+            if cmd == 'status':
+                ret = '; '.join([d['key'] for d in self._tunprocs_map.values()])
+                send_package(sock, 0, json.dumps({'status': 'success', 'message': ret}))
+            elif cmd == 'kill':
+                wkills = set(cmds[1:])
+                killeds = set()
+                for p, cxt in self._tunprocs_map.items():
+                    if 'all' in wkills or cxt['key'] in wkills:
+                        self._close_tun_cxt(cxt)
+                        killeds.add(cxt['key'])
+                send_package(sock, 0, json.dumps({'status': 'success', 'message': '; '.join(killeds)}))
+            else:
+                send_package(sock, 0, json.dumps({'status': 'error', 'message': "Unknow %s" % cmd}))
+            return
+        cxt = {'sock': sock}
+        data.setdefault('bind', '0.0.0.0')
         for k in ['bind', 'port']:
             if data.get(k):
-                kwargs[k] = data[k]
+                cxt[k] = data[k]
+        cxt['key'] = '%s:%s' % (cxt['bind'], cxt['port'])
         self._log('new client version: %s' % data['version'])
         from multiprocessing import Process
 
         def tunrun():
-            t = Tunnel(**kwargs)
+            t = Tunnel(**cxt)
             t.start()
+            # cxt['tun'] = t
             while t._running and self._running:
                 time.sleep(3)
 
-        tun = Process(target=tunrun)
-        tun.start()
-        return tun
+        proc = Process(target=tunrun)
+        proc.start()
+        with self._tunprocs_lock:
+            cxt['proc'] = proc
+            self._tunprocs_map[proc] = cxt
+        return proc
+
+    def _close_tun_cxt(self, cxt):
+        sock = cxt.pop('sock', None)
+        proc = cxt.pop('proc', None)
+        try:
+            if sock:
+                sock_close(sock)
+        except:
+            pass
+        try:
+            if proc:
+                proc.terminate()
+        except:
+            pass
+
+    def _check_tunprocs(self):
+        while self._running:
+            delps = []
+            for p in self._tunprocs_map:
+                if not p.is_alive():
+                    delps.append(p)
+            if delps:
+                with self._tunprocs_lock:
+                    for p in delps:
+                        cxt = self._tunprocs_map[p]
+                        self._close_tun_cxt(cxt)
+                        self._log('remove process', cxt)
+                        del self._tunprocs_map[p]
+                self._log('now process count=%d' % len(self._tunprocs_map))
+            time.sleep(10)
 
     def _run(self):
         try:
@@ -453,10 +508,11 @@ class Server(SockRunable):
             import traceback
             traceback.print_exc()
             self.stop()
+        start_thread(target=self._check_tunprocs)
         while self._running:
             try:
                 clt_con, clt_add = self._sock.accept()
-                self._log('new tun req', clt_con, clt_add)
+                self._log('new client req', clt_con, clt_add)
                 try:
                     ret = self._ready(clt_con, clt_add)
                     if not ret:
@@ -476,10 +532,11 @@ class Client(SockRunable):
     port = 1990
     passwd = '123'
     proxy_port = 1091
+    proxy_bind = '0.0.0.0'
 
     target_host = '127.0.0.1'
     target_port = 6379
-
+    command = ''
     _client_map = {}
 
     def _run_con(self, ix, sock):
@@ -525,7 +582,7 @@ class Client(SockRunable):
             sock.connect((self.server, self.port), )
             self._log('connected server %s:%s' % (self.server, self.port))
             self._log('verifying...')
-            send_package(sock, 0, json.dumps({'version': __version__, 'passwd': self.passwd, 'port': self.proxy_port}))
+            send_package(sock, 0, json.dumps({'version': __version__, 'command': self.command, 'passwd': self.passwd, 'bind': self.proxy_bind, 'port': self.proxy_port}))
             _, data = read_package(sock)
             ret = json.loads(data)
             if ret['status'] == 'ok':
@@ -602,11 +659,12 @@ def main():
 
     parser.add_argument('-t', '--target', help='target endpoint, such as: 127.0.0.1:8080', type=parse_endpoint)
     parser.add_argument('-s', '--server', help='server endpoint, such as: 192.168.1.3:1990', type=parse_endpoint)
-    parser.add_argument('-p', '--port', help='server proxy port, such as: 1090', type=int)
+    parser.add_argument('-p', '--port', help='server proxy port, such as: 192.168.1.3:1090', type=parse_endpoint)
 
     parser.add_argument('-b', '--bind', help='the server bind endpoint, such as: 0.0.0.0:1990', type=parse_endpoint)
 
     parser.add_argument('-e', '--passwd', help='the password, default is empty', type=str, default='')
+    parser.add_argument('-c', '--command', help='the method, default is empty', nargs='+', type=str, default='')
     args = parser.parse_args()
     if args.bind:
         # server
@@ -616,15 +674,17 @@ def main():
             'passwd': args.passwd,
         }
         run = Server(**d)
-    elif args.server and args.target:
+    elif args.server:
         # client
         d = {
             'server': args.server[0],
             'port': args.server[1],
-            'proxy_port': args.port,
-            'target_host': args.target[0],
-            'target_port': args.target[1],
+            'proxy_bind': args.port[0] if args.port else '0.0.0.0',
+            'proxy_port': args.port[1] if args.port else 8080,
+            'target_host': args.target[0] if args.target else '127.0.0.1',
+            'target_port': args.target[1] if args.target else 8080,
             'passwd': args.passwd,
+            'command': ' '.join(args.command),
         }
         run = Client(**d)
     else:
