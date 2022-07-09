@@ -3,21 +3,43 @@ from __future__ import print_function
 import sys, time, json
 import socket
 
-__version__ = '2.2.0'
+__version__ = '2.3.2'
 
 READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
-TIME_FOR_PING_S = 30
+TIME_FOR_PING_S = 60
+TIME_FOR_DOG_TIMEOUT = 60 * 2
 IS_PY3 = sys.version_info >= (3, 0)
 
 
 def print_it(*args):
-    print(time.time(), *args)
+    import datetime
+    print(datetime.datetime.now(), *args)
 
 
 def send_str(sock, msg, code=0):
     if sock:
         sock.sendall(msg.encode('utf-8'))
+
+
+def _exit_system(code=0):
+    try:
+        import os
+        # print('exit...')
+        time.sleep(1)
+        # print('exit!!!')
+        os._exit(code)
+    except:
+        # print('exeee')
+        pass
+
+
+def exit_system(code=0):
+    start_thread(_exit_system, args=[code])
+
+
+def int_time():
+    return int(time.time())
 
 
 def start_thread(target=None, args=[]):
@@ -237,7 +259,8 @@ class Runable(Base):
     _running = False
 
     def __str__(self):
-        return '%s' % (self.__class__.__name__)
+        import os
+        return '%s[Pid%s]' % (self.__class__.__name__, os.getpid())
 
     def _log(self, msg, *args):
         print_it(self, msg, *args)
@@ -262,6 +285,35 @@ class Runable(Base):
         self._running = False
         self._log('_running', self._running)
 
+    _dog_runing = False
+    _dog_last = 0
+
+    def _dog_run(self):
+        self._dog_last = int_time()
+        while self._dog_runing:
+            now = int_time()
+            if (now - self._dog_last) > TIME_FOR_DOG_TIMEOUT:
+                print(self, 'dog time out', now, self._dog_last)
+                if not self._on_dog_timeout():
+                    exit_system(-1)
+            time.sleep(1)
+            print('ck', self._dog_last)
+
+    def stop_dog(self):
+        self._dog_runing = False
+
+    def start_dog(self):
+        self._dog_runing = True
+        start_thread(self._dog_run)
+
+    def feed_dog(self):
+        ''''''
+        self._dog_last = int_time()
+        # self._log('feed dog', self._dog_last)
+
+    def _on_dog_timeout(self):
+        pass
+
 
 class SockRunable(Runable):
     _sock = None
@@ -276,6 +328,11 @@ class SockRunable(Runable):
             self._sock = None
         super(SockRunable, self).stop()
 
+    def _on_dog_timeout(self):
+        super(SockRunable, self)._on_dog_timeout()
+        if self._sock:
+            self.stop()
+
 
 class Tunnel(SockRunable):
     sock = None
@@ -286,7 +343,7 @@ class Tunnel(SockRunable):
     _lock = Lock()
 
     def __str__(self):
-        return '%s[%d]' % (self.__class__.__name__, self.port)
+        return '%s[%d]' % (super(Tunnel, self).__str__(), self.port)
 
     def _run_con(self, sock, ix):
         send_package(self.sock, ix, b'')
@@ -340,7 +397,7 @@ class Tunnel(SockRunable):
                     if data == b'ping':
                         send_package(self.sock, 0, b'pong')
                     elif data == b'pong':
-                        pass
+                        self.feed_dog()
                 else:
                     self._del_con(abs(ix))
             else:
@@ -355,6 +412,7 @@ class Tunnel(SockRunable):
         try:
             self._sock_th = start_thread(self._run_sock)
             self._ping_th = start_thread(self._run_ping)
+            self.start_dog()
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -376,6 +434,7 @@ class Tunnel(SockRunable):
                     import traceback
                     traceback.print_exc()
                     self.stop()
+            self.stop_dog()
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -439,6 +498,9 @@ class Server(SockRunable):
                         self._close_tun_cxt(cxt)
                         killeds.add(cxt['key'])
                 send_package(sock, 0, json.dumps({'status': 'success', 'message': '; '.join(killeds)}))
+            elif cmd == 'exit':
+                send_package(sock, 0, json.dumps({'status': 'success', 'message': 'ok'}))
+                exit_system(0)
             else:
                 send_package(sock, 0, json.dumps({'status': 'error', 'message': "Unknow %s" % cmd}))
             return
@@ -493,9 +555,11 @@ class Server(SockRunable):
                         self._log('remove process', cxt)
                         del self._tunprocs_map[p]
                 self._log('now process count=%d' % len(self._tunprocs_map))
-            time.sleep(10)
+            time.sleep(TIME_FOR_DOG_TIMEOUT / 2 or 1)
+            self.feed_dog()
 
     def _run(self):
+        self.start_dog()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -525,6 +589,7 @@ class Server(SockRunable):
                 import traceback
                 traceback.print_exc()
                 self.stop()
+        self.stop_dog()
 
 
 class Client(SockRunable):
@@ -574,6 +639,7 @@ class Client(SockRunable):
             time.sleep(TIME_FOR_PING_S)
 
     def _run(self):
+        self.start_dog()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._sock = sock
@@ -595,7 +661,7 @@ class Client(SockRunable):
             traceback.print_exc()
             self.stop()
             return
-
+        self.feed_dog()
         self._ping_th = start_thread(target=self._run_ping)
         self._log('tunnel', '%s:%s' % (self.target_host, self.target_port), '<->', '%s:%s' % (self.server, self.proxy_port))
         while self._running:
@@ -618,7 +684,7 @@ class Client(SockRunable):
                     if data == b'ping':
                         send_package(sock, 0, b'pong')
                     elif data == b'pong':
-                        pass
+                        self.feed_dog()
                     else:
                         self._log('[Server]\033[31m%s\033[0m' % data.decode())
                         self.stop()
@@ -628,6 +694,7 @@ class Client(SockRunable):
                         if data == b'ping':
                             # ping
                             send_package(sock, -1 * ix, b'pong')
+                            self.feed_dog()
                         elif not data or data == b'close':
                             d = self._client_map[nix]
                             sock_close(d['sock'])
@@ -665,8 +732,12 @@ def main():
 
     parser.add_argument('-e', '--passwd', help='the password, default is empty', type=str, default='')
     parser.add_argument('-c', '--command', help='the method, default is empty', nargs='+', type=str, default='')
+    parser.add_argument('-v', '--version', help='show the version %s' % __version__, action='store_true')
     args = parser.parse_args()
-    if args.bind:
+    run = None
+    if args.version:
+        print(__version__)
+    elif args.bind:
         # server
         d = {
             'bind': args.bind[0],
@@ -689,18 +760,19 @@ def main():
         run = Client(**d)
     else:
         parser.print_help()
-        exit(-1)
+        exit_system(-1)
 
     def stop(a, b):
         print_it('stop')
         run.stop()
 
     signal.signal(signal.SIGINT, stop)
-    print_it('---pytunnel V%s---' % __version__)
-    run.start()
-    while run._running:
+    if run:
+        print_it('---pytunnel V%s---' % __version__)
+        run.start()
+        while run._running:
+            time.sleep(1)
         time.sleep(1)
-    time.sleep(1)
 
 
 if __name__ == '__main__':

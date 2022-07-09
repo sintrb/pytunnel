@@ -12,3 +12,8 @@ CHANGES
 
 - Fix bugs
 - Use multiprocessing to improve throughput capacity
+
+2.3.0
+
+- Add watch dog to check status
+
