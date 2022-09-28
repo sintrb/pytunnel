@@ -3,7 +3,7 @@ from __future__ import print_function
 import sys, time, json
 import socket
 
-__version__ = '2.3.2'
+__version__ = '2.4.0'
 
 READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
@@ -252,6 +252,7 @@ class SockIO(object):
 class Base(object):
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+        self.starttime = int_time()
 
 
 class Runable(Base):
@@ -293,11 +294,10 @@ class Runable(Base):
         while self._dog_runing:
             now = int_time()
             if (now - self._dog_last) > TIME_FOR_DOG_TIMEOUT:
-                print(self, 'dog time out', now, self._dog_last)
+                self._log('watchdog time out', now, self._dog_last)
                 if not self._on_dog_timeout():
                     exit_system(-1)
             time.sleep(1)
-            print('ck', self._dog_last)
 
     def stop_dog(self):
         self._dog_runing = False
@@ -338,12 +338,13 @@ class Tunnel(SockRunable):
     sock = None
     bind = '0.0.0.0'
     port = 0
+    name = None
     _client_map = {}
     _client_ix = 0
     _lock = Lock()
 
     def __str__(self):
-        return '%s[%d]' % (super(Tunnel, self).__str__(), self.port)
+        return '%s[%s][%d]' % (super(Tunnel, self).__str__(), self.name, self.port)
 
     def _run_con(self, sock, ix):
         send_package(self.sock, ix, b'')
@@ -475,8 +476,8 @@ class Server(SockRunable):
 
     def _ready(self, sock, addr):
         _, auth = read_package(sock)
-        # self._log('auth', auth)
-        data = json.loads(auth)
+        self._log('auth', auth)
+        data = json.loads(auth, encoding='utf8')
         # self._log('tun req data', data)
         if self.passwd and self.passwd != data.get('passwd'):
             # send_str(sock, 'password error!')
@@ -488,21 +489,36 @@ class Server(SockRunable):
             cmds = data['command'].split(' ')
             cmd = cmds[0]
             if cmd == 'status':
-                ret = '; '.join([d['key'] for d in self._tunprocs_map.values()])
-                send_package(sock, 0, json.dumps({'status': 'success', 'message': ret}))
+                # ret = '; '.join([d['key'] for d in self._tunprocs_map.values()])
+                # print(self._tunprocs_map)
+                KEYS = ['key', 'ip', 'name']
+                clients = []
+                for d in self._tunprocs_map.values():
+                    cd = {k: d[k] for k in KEYS if k in d}
+                    cd['uptiem'] = int_time() - d['startime']
+                    clients.append(cd)
+                md = {
+                    'clients': clients,
+                    'uptime': int_time() - self.starttime,
+                }
+                send_package(sock, 0, json.dumps({'status': 'success', 'message': 'ok', 'data': md}))
             elif cmd == 'kill':
                 wkills = set(cmds[1:])
                 killeds = set()
-                for p, cxt in self._tunprocs_map.items():
-                    if 'all' in wkills or cxt['key'] in wkills:
+                for p, cxt in list(self._tunprocs_map.items()):
+                    if 'all' in wkills or (cxt['key'] in wkills or cxt.get('name') and cxt['name'] in wkills):
                         self._close_tun_cxt(cxt)
                         killeds.add(cxt['key'])
-                send_package(sock, 0, json.dumps({'status': 'success', 'message': '; '.join(killeds)}))
+                        if p in self._tunprocs_map:
+                            del self._tunprocs_map[p]
+                send_package(sock, 0, json.dumps({'status': 'success', 'message': 'killed:' ','.join(killeds)}))
             elif cmd == 'exit':
                 send_package(sock, 0, json.dumps({'status': 'success', 'message': 'ok'}))
+                self._log('will exit...')
+                self._ready_exit()
                 exit_system(0)
             else:
-                send_package(sock, 0, json.dumps({'status': 'error', 'message': "Unknow %s" % cmd}))
+                send_package(sock, 0, json.dumps({'status': 'error', 'message': "Unknow Command '%s'" % cmd}))
             return
         cxt = {'sock': sock}
         data.setdefault('bind', '0.0.0.0')
@@ -510,7 +526,12 @@ class Server(SockRunable):
             if data.get(k):
                 cxt[k] = data[k]
         cxt['key'] = '%s:%s' % (cxt['bind'], cxt['port'])
-        self._log('new client version: %s' % data['version'])
+        cxt['ip'] = addr[0]
+        cxt['startime'] = int_time()
+        for k in ['name']:
+            if k in data:
+                cxt[k] = data[k]
+        self._log('new client version=%s name=%s' % (data['version'], data.get('name')))
         from multiprocessing import Process
 
         def tunrun():
@@ -558,6 +579,10 @@ class Server(SockRunable):
             time.sleep(TIME_FOR_DOG_TIMEOUT / 2 or 1)
             self.feed_dog()
 
+    def _ready_exit(self):
+        for cxt in self._tunprocs_map.values():
+            self._close_tun_cxt(cxt)
+
     def _run(self):
         self.start_dog()
         try:
@@ -602,6 +627,7 @@ class Client(SockRunable):
     target_host = '127.0.0.1'
     target_port = 6379
     command = ''
+    name = ''
     _client_map = {}
 
     def _run_con(self, ix, sock):
@@ -648,13 +674,21 @@ class Client(SockRunable):
             sock.connect((self.server, self.port), )
             self._log('connected server %s:%s' % (self.server, self.port))
             self._log('verifying...')
-            send_package(sock, 0, json.dumps({'version': __version__, 'command': self.command, 'passwd': self.passwd, 'bind': self.proxy_bind, 'port': self.proxy_port}))
+            sd = {
+                'version': __version__,
+                'command': self.command,
+                'passwd': self.passwd,
+                'bind': self.proxy_bind,
+                'port': self.proxy_port,
+                'name': self.name or socket.gethostname(),
+            }
+            send_package(sock, 0, json.dumps(sd))
             _, data = read_package(sock)
             ret = json.loads(data)
             if ret['status'] == 'ok':
                 self._log('server version V%s, verified!' % ret['version'])
             else:
-                self._log('\033[31m%s: %s\033[0m' % (ret['status'], ret['message']))
+                # self._log('\033[31m%s: %s\033[0m' % (ret['status'], ret['message']))
                 raise Exception(ret['message'])
         except:
             import traceback
@@ -686,7 +720,8 @@ class Client(SockRunable):
                     elif data == b'pong':
                         self.feed_dog()
                     else:
-                        self._log('[Server]\033[31m%s\033[0m' % data.decode())
+                        self._log('[Server]\033[31m%s\033[0m' % data.decode('utf8'))
+                        # print(data.decode('utf8'))
                         self.stop()
                 else:
                     nix = abs(ix)
@@ -727,7 +762,7 @@ def main():
     parser.add_argument('-t', '--target', help='target endpoint, such as: 127.0.0.1:8080', type=parse_endpoint)
     parser.add_argument('-s', '--server', help='server endpoint, such as: 192.168.1.3:1990', type=parse_endpoint)
     parser.add_argument('-p', '--port', help='server proxy port, such as: 192.168.1.3:1090', type=parse_endpoint)
-
+    parser.add_argument('-n', '--name', help='the client name, default is hostname', type=str, default=socket.gethostname())
     parser.add_argument('-b', '--bind', help='the server bind endpoint, such as: 0.0.0.0:1990', type=parse_endpoint)
 
     parser.add_argument('-e', '--passwd', help='the password, default is empty', type=str, default='')
@@ -756,6 +791,7 @@ def main():
             'target_port': args.target[1] if args.target else 8080,
             'passwd': args.passwd,
             'command': ' '.join(args.command),
+            'name': args.name,
         }
         run = Client(**d)
     else:
