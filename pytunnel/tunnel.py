@@ -477,7 +477,7 @@ class Server(SockRunable):
     def _ready(self, sock, addr):
         _, auth = read_package(sock)
         self._log('auth', auth)
-        data = json.loads(auth, encoding='utf8')
+        data = json.loads(auth)
         # self._log('tun req data', data)
         if self.passwd and self.passwd != data.get('passwd'):
             # send_str(sock, 'password error!')
