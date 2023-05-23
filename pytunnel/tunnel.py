@@ -3,7 +3,7 @@ from __future__ import print_function
 import sys, time, json
 import socket
 
-__version__ = '2.4.0'
+__version__ = '2.4.1'
 
 READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
@@ -466,7 +466,12 @@ class Tunnel(SockRunable):
             super(Tunnel, self).stop()
             self._log('stop')
 
-
+def tunrun(self, cxt):
+    t = Tunnel(**cxt)
+    t.start()
+    # cxt['tun'] = t
+    while t._running and self._running:
+        time.sleep(3)
 class Server(SockRunable):
     bind = '0.0.0.0'
     port = 1990
@@ -534,14 +539,8 @@ class Server(SockRunable):
         self._log('new client version=%s name=%s' % (data['version'], data.get('name')))
         from multiprocessing import Process
 
-        def tunrun():
-            t = Tunnel(**cxt)
-            t.start()
-            # cxt['tun'] = t
-            while t._running and self._running:
-                time.sleep(3)
 
-        proc = Process(target=tunrun)
+        proc = Process(target=tunrun, args=(self, cxt))
         proc.start()
         with self._tunprocs_lock:
             cxt['proc'] = proc
