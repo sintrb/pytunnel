@@ -17,3 +17,6 @@ CHANGES
 
 - Add watch dog to check status
 
+2.4.2
+
+- Fix bugs with python 3.9+
