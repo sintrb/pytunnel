@@ -29,5 +29,29 @@ It will make a tunnel with 192.168.1.102:1090 and 127.0.0.1:8080.
 
 Now, you can open 192.168.1.102:1090 to access the local computer port 8080.
 
+Other
+===============
+
+You can use ```-e``` to set the password:
+
+```bash
+# server
+python -m pytunnel --bind 0.0.0.0:1990 -e "abcdef"
+# client
+python -m pytunnel --port 1090 --target 127.0.0.1:8080 --server 192.168.1.102:1990 -e "abcdef"
+```
+
+Client can use ```-c``` to excute a command at the server computer:
+
+```bash
+# show server status
+python -m pytunnel --server 192.168.1.102:1990 -c "status"
+
+# let server exit
+python -m pytunnel --server 192.168.1.102:1990 -c "exit"
+
+# kill some client, the client-key can found with "status" command
+python -m pytunnel --server 192.168.1.102:1990 -c "kill client-key"
+```
 
 [Click to view more information!](https://github.com/sintrb/pytunnel)

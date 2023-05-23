@@ -3,7 +3,7 @@ from __future__ import print_function
 import sys, time, json
 import socket
 
-__version__ = '2.4.1'
+__version__ = '2.4.2'
 
 READ_BUF_LEN = 1300
 TIME_WAIT_SEND_S = 3
